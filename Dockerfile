@@ -1,20 +1,24 @@
 # Base images are pinned by digest (Docker build best practices); bump tag and
 # digest together.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c AS build
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c AS build
 ARG TARGETARCH
 WORKDIR /src
 COPY server/go.mod server/go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 COPY server/ ./
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH \
     go build -trimpath -ldflags="-s -w" -o /out/server . \
     && mkdir /out/data
 
 # Build the frontend natively on the build platform; its output is arch-independent.
-FROM --platform=$BUILDPLATFORM node:22-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c AS web
+FROM --platform=$BUILDPLATFORM ghcr.io/pnpm/pnpm:11.13.1@sha256:ed3fbca56b39f0de753c15ffa352909a0e30056a1ed19e820903b9b73a1922bc AS web
 WORKDIR /src
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN corepack enable && pnpm install --frozen-lockfile
+RUN --mount=type=cache,id=pnpm,target=/var/cache/pnpm \
+    pnpm install --store-dir /var/cache/pnpm --frozen-lockfile
 COPY web/ web/
 COPY shared/ shared/
 COPY tools/build-home.mjs tools/build-home.mjs
@@ -22,9 +26,9 @@ RUN pnpm run build
 
 # The server is one static binary: no shell, package manager, or root user.
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab AS app
-COPY --from=build --chown=65532:65532 /out/data /data
-COPY --from=build /out/server /app/server
-COPY --from=web /src/web/dist /app/web
+COPY --from=build --chown=65532:65532 --link /out/data /data
+COPY --from=build /out/server --link /app/server
+COPY --from=web /src/web/dist --link /app/web
 ARG OG_VERSION=dev
 ARG OG_REVISION=unknown
 # OCI image annotations: https://github.com/opencontainers/image-spec/blob/main/annotations.md
